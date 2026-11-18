@@ -1,397 +1,258 @@
 (function () {
   "use strict";
 
-  // ============================================================================
-  // 1. UNIVERSAL THREE.JS COMPATIBILITY LAYER (Prevents AI Crashes)
-  // ============================================================================
-  if (typeof THREE !== "undefined") {
-    if (!THREE.CapsuleGeometry) {
-      THREE.CapsuleGeometry = function (radius = 0.5, length = 1, capSegments = 8, radialSegments = 16) {
-        const points = [];
-        const halfLen = length * 0.5;
-        for (let i = 0; i <= capSegments; i++) {
-          const a = (i / capSegments) * (Math.PI * 0.5);
-          points.push(new THREE.Vector2(Math.sin(a) * radius, -halfLen - Math.cos(a) * radius));
+  // 1. DYNAMIC DEPENDENCY LOADER (GLTFLoader + mp4-muxer)
+  function loadScript(src, timeoutMs = 4000) {
+    return new Promise((resolve) => {
+      const s = document.createElement("script");
+      s.src = src;
+      const t = setTimeout(() => resolve(false), timeoutMs);
+      s.onload = () => { clearTimeout(t); resolve(true); };
+      s.onerror = () => { clearTimeout(t); resolve(false); };
+      document.head.appendChild(s);
+    });
+  }
+
+  // 2. SMART CACHE FETCH LOGIC (Pulls from Worker)
+  async function fetchScenePayload() {
+    const fallback = { title: "Kinetra3D Cinema", narration: "", atmosphere: "studio_clean", code: "" };
+    const urlObj = new URL(window.location.href);
+    const sceneId = urlObj.searchParams.get("id");
+    
+    if (sceneId) {
+      try {
+        // Fetch the raw code from our Cloudflare Worker Cache
+        const res = await fetch(`https://ai-3d-video-studio-mcp.kinetra3d.workers.dev/scene?id=${encodeURIComponent(sceneId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          return { ...fallback, ...data };
         }
-        for (let i = 0; i <= capSegments; i++) {
-          const a = (i / capSegments) * (Math.PI * 0.5);
-          points.push(new THREE.Vector2(Math.cos(a) * radius, halfLen + Math.sin(a) * radius));
-        }
-        const geo = new THREE.LatheGeometry(points, radialSegments);
-        geo.computeVertexNormals();
-        return geo;
-      }
+      } catch (e) { console.error("Worker fetch failed", e); }
     }
+    return fallback;
   }
 
-  // ============================================================================
-  // 2. SAFE PAYLOAD DECODER
-  // ============================================================================
-  function decodePayload(raw) {
-    let clean = raw.trim();
-    try { clean = decodeURIComponent(clean); } catch (e) {}
-    clean = clean.replace(/-/g, "+").replace(/_/g, "/").replace(/\s/g, "");
-    while (clean.length % 4 !== 0) clean += "=";
-    const bin = atob(clean);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return JSON.parse(new TextDecoder("utf-8").decode(bytes));
-  }
-
-  let sceneData = { title: "Kinetra3D Cinema", narration: "", atmosphere: "studio_clean", code: "" };
-  let payloadError = false;
-
-  try {
-    const idx = window.location.href.indexOf("#scene=");
-    if (idx !== -1) {
-      const parsed = decodePayload(window.location.href.slice(idx + 7));
-      if (parsed) sceneData = { ...sceneData, ...parsed };
-    }
-  } catch (err) {
-    console.error("Payload decode error:", err);
-    payloadError = true;
-    sceneData.title = "URL Error / Code Too Long";
-  }
-
-  const uiTitle = document.getElementById("uiTitle");
-  if (uiTitle) uiTitle.textContent = sceneData.title || "Kinetra3D Studio";
-  const uiStatus = document.getElementById("uiStatus");
-
-  // ============================================================================
-  // 3. CORE RENDERING ENGINE & AUTO-CAMERA FRAMING
-  // ============================================================================
-  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
-  renderer.setSize(1280, 720);
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
-  renderer.outputEncoding = THREE.sRGBEncoding;
-  
-  const previewContainer = document.getElementById("previewContainer");
-  if (previewContainer) previewContainer.insertBefore(renderer.domElement, previewContainer.firstChild);
-
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(44, 16 / 9, 0.1, 300);
-  camera.position.set(0, 2.2, 6.5);
-
-  const ATMOSPHERES = {
-    cyber_neon:     { bg: 0x090e1f, key: 0x60a5fa, rim: 0xf43f5e, ground: 0x1e293b },
-    magical_forest: { bg: 0x0a2117, key: 0x34d399, rim: 0xfbbf24, ground: 0x064e3b },
-    sunset_golden:  { bg: 0x29130a, key: 0xfbbf24, rim: 0xf97316, ground: 0x451a03 },
-    space_cosmos:   { bg: 0x060612, key: 0xa78bfa, rim: 0x38bdf8, ground: 0x0f172a },
-    studio_clean:   { bg: 0x171c2b, key: 0xfff8eb, rim: 0x818cf8, ground: 0x1e2536 }
-  };
-  const theme = ATMOSPHERES[sceneData.atmosphere] || ATMOSPHERES.studio_clean;
-  scene.background = new THREE.Color(theme.bg);
-
-  const studioRig = new THREE.Group();
-  const hemiLight = new THREE.HemisphereLight(0xffffff, theme.ground, 0.9);
-  const keyLight = new THREE.DirectionalLight(theme.key, 1.45);
-  keyLight.position.set(6, 12, 8);
-  keyLight.castShadow = true;
-  const rimLight = new THREE.PointLight(theme.rim, 1.8, 30, 2);
-  rimLight.position.set(-5, 4.5, -4);
-  studioRig.add(hemiLight, keyLight, rimLight);
-  scene.add(studioRig);
-
-  // 🔴 POWERFUL CODE WASHER (Strips Markdown, Imports, and Bad Instantiations)
+  // 3. AI CODE WASHER
   function sanitizeAICode(rawCode) {
     if (typeof rawCode !== "string") return "";
-    let c = rawCode;
-    // Strip Markdown code blocks (```javascript, ```js, etc.)
-    c = c.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "");
-    // Strip ES6 imports
-    c = c.replace(/import\s+.*?from\s+['"].*?['"]\s*;?/g, "");
-    // Strip redefining of core variables
-    c = c.replace(/(?:const|let|var)\s+scene\s*=\s*new\s+THREE\.Scene\s*\([^)]*\)\s*;?/g, "");
-    c = c.replace(/(?:const|let|var)\s+camera\s*=\s*new\s+THREE\.PerspectiveCamera\s*\([^)]*\)\s*;?/g, "");
-    c = c.replace(/(?:const|let|var)\s+renderer\s*=\s*new\s+THREE\.WebGLRenderer\s*\([^)]*\)\s*;?/g, "");
-    c = c.replace(/document\.body\.appendChild\s*\([^)]*\)\s*;?/g, "");
-    return c.trim();
+    return rawCode
+      .replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "")
+      .replace(/import\s+.*?from\s+['"].*?['"]\s*;?/g, "")
+      .replace(/(?:const|let|var)\s+scene\s*=\s*new\s+THREE\.Scene\s*\([^)]*\)\s*;?/g, "")
+      .replace(/(?:const|let|var)\s+camera\s*=\s*new\s+THREE\.PerspectiveCamera\s*\([^)]*\)\s*;?/g, "")
+      .replace(/(?:const|let|var)\s+renderer\s*=\s*new\s+THREE\.WebGLRenderer\s*\([^)]*\)\s*;?/g, "")
+      .replace(/document\.body\.appendChild\s*\([^)]*\)\s*;?/g, "")
+      .trim();
   }
 
-  function calibrateSceneAndCamera(hasCustomAnimation) {
-    let customLights = 0, meshCount = 0;
-    const worldBox = new THREE.Box3();
+  // 4. OFFLINE AUDIO MASTERING
+  async function buildAudioTrack(narrationText) {
+    const text = (narrationText || "").replace(/\[.*?\]/g, " ").trim();
+    if (!text) return { durationSec: 15, fps: 30, totalFrames: 450, lipEnvelope: new Float32Array(450), buffer: null };
 
-    scene.traverse((node) => {
-      if (node.isLight && node.parent !== studioRig) { customLights++; if (node.intensity > 1.4) node.intensity = 1.25; }
-      if (node.isMesh) {
-        meshCount++;
-        worldBox.expandByObject(node);
-        if (node.material) {
-          const mats = Array.isArray(node.material) ? node.material : [node.material];
-          mats.forEach(m => {
-            if (m.color && (0.2126 * m.color.r + 0.7152 * m.color.g + 0.0722 * m.color.b > 0.84)) m.color.multiplyScalar(0.8);
-            if (m.isMeshBasicMaterial && !m.map) node.material = new THREE.MeshStandardMaterial({ color: m.color, roughness: 0.45, metalness: 0.1 });
-          });
-        }
-      }
-    });
-
-    if (customLights > 0) { keyLight.intensity = 0.6; hemiLight.intensity = 0.4; }
-
-    if (!hasCustomAnimation && meshCount > 0 && !worldBox.isEmpty()) {
-      const center = worldBox.getCenter(new THREE.Vector3());
-      const size = worldBox.getSize(new THREE.Vector3()).length();
-      const dist = Math.max(4.5, Math.min(15, size * 1.3));
-      window.animateScene = function (t, p) {
-        const angle = p * Math.PI * 1.1 - 0.55;
-        camera.position.set(center.x + Math.sin(angle) * dist, center.y + dist * 0.3 + Math.sin(t * 1.2) * 0.2, center.z + Math.cos(angle) * dist);
-        camera.lookAt(center);
-      };
-    }
-    return meshCount;
-  }
-
-  // ============================================================================
-  // 4. STUDIO TOOLKIT (Robust & AI-Proof)
-  // ============================================================================
-  const animatedCharacters = [];
-  const Studio = {
-    Math: { clamp: (v, m, M) => Math.max(m, Math.min(M, v)), lerp: (a, b, t) => a + (b - a) * t },
-    paint: (cHex, finish = "standard") => {
-      const c = new THREE.Color(cHex);
-      if (finish === "glossy") return new THREE.MeshStandardMaterial({ color: c, roughness: 0.15, metalness: 0.1 });
-      if (finish === "metal") return new THREE.MeshStandardMaterial({ color: c, roughness: 0.2, metalness: 0.85 });
-      if (finish === "neon") return new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 0.9, roughness: 0.3 });
-      return new THREE.MeshStandardMaterial({ color: c, roughness: 0.45, metalness: 0.12 });
-    },
-    createTextTexture(text, opts = {}) {
-      const cvs = document.createElement("canvas");
-      cvs.width = opts.width || 512; cvs.height = opts.height || 256;
-      const ctx = cvs.getContext("2d");
-      ctx.fillStyle = opts.bg || "#1e293b"; ctx.fillRect(0, 0, cvs.width, cvs.height);
-      ctx.fillStyle = opts.color || "#ffffff"; ctx.font = `bold ${opts.fontSize || 48}px sans-serif`;
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      const lines = String(text).split("\n");
-      const lh = (opts.fontSize || 48) * 1.25;
-      const startY = cvs.height / 2 - ((lines.length - 1) * lh) / 2;
-      lines.forEach((line, i) => ctx.fillText(line, cvs.width / 2, startY + i * lh));
-      const tex = new THREE.CanvasTexture(cvs); tex.encoding = THREE.sRGBEncoding; return tex;
-    },
-    label: (target, text, opts = {}) => {
-      const p = new THREE.Mesh(new THREE.PlaneGeometry(opts.w || 1.2, opts.h || 0.5), new THREE.MeshBasicMaterial({ map: Studio.createTextTexture(text, opts), transparent: true }));
-      p.position.set(opts.x || 0, opts.y || 0, opts.z || 0.52);
-      target.add(p);
-    },
-    lathe(profilePoints, segments = 48, material = null) {
-      const pts = profilePoints.map(([x, y]) => new THREE.Vector2(x, y));
-      const geo = new THREE.LatheGeometry(pts, segments); geo.computeVertexNormals();
-      const mesh = new THREE.Mesh(geo, material || Studio.paint(0x6366f1, "glossy"));
-      mesh.castShadow = true; mesh.receiveShadow = true; return mesh;
-    },
-    character(opts = {}) {
-      const root = new THREE.Group(); const bodyGroup = new THREE.Group(); root.add(bodyGroup);
-      const mat = Studio.paint(opts.color || 0x3b82f6, opts.finish || "glossy");
-      
-      let body;
-      if (opts.shape === "cup") {
-        body = Studio.lathe([[0, 0], [0.4, 0], [0.5, 0.9], [0.4, 0.9], [0.3, 0.1], [0, 0.1]], 32, mat);
-        const handle = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.05, 16, 32, Math.PI), mat);
-        handle.position.set(0.45, 0.5, 0); handle.rotation.z = -Math.PI / 2; bodyGroup.add(handle);
-      } else if (opts.shape === "biscuit" || opts.shape === "disc") {
-        body = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.2, 32), mat);
-        body.rotation.x = Math.PI / 2; body.position.y = 0.5;
-      } else if (opts.shape === "sphere") {
-        body = new THREE.Mesh(new THREE.SphereGeometry(0.55, 32, 32), mat);
-        body.position.y = 0.55;
-      } else {
-        body = new THREE.Mesh(new THREE.CapsuleGeometry(0.45, 0.4, 8, 16), mat);
-        body.position.y = 0.65;
-      }
-      body.castShadow = true; bodyGroup.add(body);
-
-      const eyeY = (opts.shape === "biscuit" || opts.shape === "disc" || opts.shape === "sphere") ? 0.55 : (opts.shape === "cup" ? 0.6 : 0.8);
-      const eyeZ = (opts.shape === "biscuit" || opts.shape === "disc") ? 0.1 : (opts.shape === "cup" ? 0.5 : 0.4);
-      
-      const le = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-      le.position.set(-0.18, eyeY, eyeZ);
-      const re = le.clone(); re.position.x = 0.18;
-      const lp = new THREE.Mesh(new THREE.SphereGeometry(0.06, 16, 16), new THREE.MeshBasicMaterial({ color: 0x000000 }));
-      lp.position.z = 0.1; le.add(lp); re.add(lp.clone());
-      bodyGroup.add(le, re);
-
-      const mouthPivot = new THREE.Group();
-      mouthPivot.position.set(0, eyeY - 0.25, eyeZ + 0.05);
-      mouthPivot.add(new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.05, 0.05), new THREE.MeshBasicMaterial({ color: 0x111111 })));
-      bodyGroup.add(mouthPivot);
-
-      if (opts.name) Studio.label(bodyGroup, opts.name, { w: 0.8, h: 0.25, y: eyeY - 0.55, z: eyeZ + 0.08, bg: "rgba(0,0,0,0.7)" });
-
-      const rig = {
-        root, leftEye: le, rightEye: re, mouthPivot, speaking: opts.speaking !== false, phase: Math.random() * Math.PI,
-        bounce: (t, speed = 4, height = 0.12) => { bodyGroup.position.y = Math.abs(Math.sin(t * speed + rig.phase)) * height; }
-      };
-      animatedCharacters.push(rig); scene.add(root); return rig;
-    }
-  };
-  window.Studio = Studio;
-
-  // ============================================================================
-  // 5. MASTER VOICE & LIP-SYNC ENGINE
-  // ============================================================================
-  let voiceAnalyser = null; let voiceTimeData = null;
-
-  function getLiveVoiceEnergy() {
-    if (!voiceAnalyser || !voiceTimeData) return 0;
-    voiceAnalyser.getByteTimeDomainData(voiceTimeData);
-    let sum = 0;
-    for (let i = 0; i < voiceTimeData.length; i++) { const v = (voiceTimeData[i] - 128) / 128; sum += v * v; }
-    return Math.min(1, Math.sqrt(sum / voiceTimeData.length) * 8.5); 
-  }
-
-  function createPowerfulVoiceBus(ctx, dest) {
-    const subPunch = ctx.createBiquadFilter(); subPunch.type = "lowshelf"; subPunch.frequency.value = 155; subPunch.gain.value = 7.5; 
-    const presence = ctx.createBiquadFilter(); presence.type = "peaking"; presence.frequency.value = 2900; presence.Q.value = 1.0; presence.gain.value = 5.0; 
-    const compressor = ctx.createDynamicsCompressor(); compressor.threshold.value = -24; compressor.ratio.value = 5.0;
-    voiceAnalyser = ctx.createAnalyser(); voiceAnalyser.fftSize = 256; voiceTimeData = new Uint8Array(voiceAnalyser.frequencyBinCount);
-    const boostGain = ctx.createGain(); boostGain.gain.value = 2.5; 
-
-    subPunch.connect(presence); presence.connect(compressor); compressor.connect(voiceAnalyser);
-    voiceAnalyser.connect(boostGain); boostGain.connect(dest);
-    try { boostGain.connect(ctx.destination); } catch(e){}
-    return subPunch;
-  }
-
-  async function fetchEmotionalNeuralVoice(ctx, text) {
+    const sampleRate = 44100;
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    
     const isHindi = /[\u0900-\u097F]/.test(text);
-    const endpoints = [
-      `https://text.pollinations.ai/${encodeURIComponent("Speak with strong, dramatic emotion and energy in " + (isHindi ? "Hindi" : "English") + ": " + text)}?model=openai-audio&voice=onyx`,
-      `https://api.streamelements.com/kappa/v2/speech?voice=${isHindi ? "Aditi" : "Matthew"}&text=${encodeURIComponent(text)}`
-    ];
-    for (const url of endpoints) {
-      try {
-        const ctrl = new AbortController();
-        const tid = setTimeout(() => ctrl.abort(), 4000);
-        const res = await fetch(url, { signal: ctrl.signal });
-        clearTimeout(tid);
-        if (res.ok) {
-          const arr = await res.arrayBuffer();
-          if (arr.byteLength > 600) return await ctx.decodeAudioData(arr);
-        }
-      } catch (e) {}
+    const url = `https://text.pollinations.ai/${encodeURIComponent("Speak dynamically: " + text)}?model=openai-audio&voice=${isHindi ? "onyx" : "echo"}`;
+    
+    let audioBuf = null;
+    try {
+      const res = await fetch(url);
+      const arr = await res.arrayBuffer();
+      audioBuf = await ctx.decodeAudioData(arr);
+    } catch(e) {}
+    
+    const durationSec = Math.max(12, Math.min(24, audioBuf ? Math.ceil(audioBuf.duration + 1) : 15));
+    const offline = new OfflineAudioContext(2, Math.ceil(sampleRate * durationSec), sampleRate);
+    
+    // Background Pad + Voice Mixing
+    const pad = offline.createOscillator(); pad.frequency.value = 98;
+    const padGain = offline.createGain(); padGain.gain.value = 0.01;
+    pad.connect(padGain); padGain.connect(offline.destination);
+    pad.start(0);
+
+    if (audioBuf) {
+      const src = offline.createBufferSource();
+      src.buffer = audioBuf;
+      const comp = offline.createDynamicsCompressor();
+      const boost = offline.createGain(); boost.gain.value = 2.0;
+      src.connect(comp); comp.connect(boost); boost.connect(offline.destination);
+      src.start(0.5);
     }
-    return null;
+
+    const rendered = await offline.startRendering();
+    
+    const fps = 30;
+    const totalFrames = durationSec * fps;
+    const lip = new Float32Array(totalFrames);
+    if (audioBuf) {
+      const ch = rendered.getChannelData(0);
+      const spf = Math.floor(sampleRate / fps);
+      for(let f=0; f<totalFrames; f++) {
+        let sum = 0;
+        for(let s=f*spf; s<(f+1)*spf; s+=8) sum += ch[s]*ch[s];
+        lip[f] = Math.min(1, Math.sqrt(sum / (spf/8)) * 6.0);
+      }
+    }
+    return { durationSec, fps, totalFrames, lipEnvelope: lip, buffer: rendered };
   }
 
-  // ============================================================================
-  // 6. RENDER LOOP & SAFE RECORDER
-  // ============================================================================
-  async function startEngine() {
-    if (uiStatus) uiStatus.textContent = "Building 3D World...";
+  // 5. MAIN STUDIO ENGINE
+  async function startStudio() {
+    document.getElementById("uiStatus").textContent = "Loading WebGL & Encoders...";
+    await Promise.all([
+      loadScript("https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js", 3000),
+      loadScript("https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js", 3000)
+    ]);
 
-    let codeCrashed = false;
-    if (sceneData.code && sceneData.code.trim().length > 10 && !payloadError) {
+    const sceneData = await fetchScenePayload();
+    document.getElementById("uiTitle").textContent = sceneData.title || "Kinetra3D Studio";
+    document.getElementById("uiStatus").textContent = "Synthesizing AI Voice...";
+
+    const audioTrack = await buildAudioTrack(sceneData.narration);
+
+    const WIDTH = 1280, HEIGHT = 720;
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(WIDTH, HEIGHT);
+    renderer.shadowMap.enabled = true;
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    document.getElementById("previewContainer").insertBefore(renderer.domElement, document.getElementById("previewContainer").firstChild);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111827); // Dark base background
+    const camera = new THREE.PerspectiveCamera(44, 16/9, 0.1, 300);
+    camera.position.set(0, 2.2, 6.5);
+
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x1e293b, 0.8);
+    const dir = new THREE.DirectionalLight(0xfff8eb, 1.2);
+    dir.position.set(5, 10, 7); dir.castShadow = true;
+    scene.add(hemi, dir);
+
+    const mixers = [];
+    const pendingLoads = [];
+
+    // STUDIO API: Dynamic GLB Loader (No Repo Uploads Needed)
+    const Studio = {
+      loadGLB: function(url, opts = {}) {
+        const group = new THREE.Group();
+        group.position.set(opts.x||0, opts.y||0, opts.z||0);
+        if (opts.ry) group.rotation.y = opts.ry;
+        scene.add(group);
+
+        if (THREE.GLTFLoader) {
+          const p = new Promise(resolve => {
+            new THREE.GLTFLoader().load(url, (gltf) => {
+              const m = gltf.scene;
+              m.scale.setScalar(opts.scale || 1.0);
+              group.add(m);
+              if (gltf.animations.length > 0) {
+                const mixer = new THREE.AnimationMixer(m);
+                mixer.clipAction(gltf.animations[0]).play();
+                mixers.push(mixer);
+              }
+              resolve();
+            }, undefined, resolve);
+          });
+          pendingLoads.push(p);
+        }
+        return group;
+      }
+    };
+    window.Studio = Studio;
+
+    // Run AI Code
+    if (sceneData.code && sceneData.code.length > 10) {
       try {
-        const safeCode = sanitizeAICode(sceneData.code);
-        const runSceneBuilder = new Function("scene", "camera", "renderer", "THREE", "Studio", safeCode);
-        runSceneBuilder(scene, camera, renderer, THREE, Studio);
-      } catch (err) {
-        console.error("AI Scene Error:", err);
-        codeCrashed = true;
-        if (uiStatus) uiStatus.textContent = "Error in AI Code, Loading Fallback...";
-      }
+        const buildFn = new Function("scene", "camera", "renderer", "THREE", "Studio", sanitizeAICode(sceneData.code));
+        buildFn(scene, camera, renderer, THREE, Studio);
+      } catch(e) { console.error("AI Logic Error:", e); }
     }
 
-    const meshCount = calibrateSceneAndCamera(typeof window.animateScene === "function");
-    
-    // 🔴 Fallback triggered if AI code crashed OR if it created 0 meshes
-    if (meshCount === 0 || codeCrashed || payloadError) {
-      const hero = Studio.character({ color: 0xf59e0b, name: payloadError ? "URL ERROR" : (sceneData.title || "KINETRA") });
-      window.animateScene = (t, p) => { hero.bounce(t); camera.position.x = Math.sin(t) * 4; camera.lookAt(0,1,0); };
-    }
+    await Promise.all(pendingLoads);
 
-    let audioCtx = null, audioDest = null, osc1 = null, audioActive = false;
-    try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const unlockAudio = () => { if (audioCtx && audioCtx.state === "suspended") audioCtx.resume().catch(()=>{}); };
-      unlockAudio();
-      document.addEventListener("touchstart", unlockAudio, { passive: true });
-      document.addEventListener("click", unlockAudio, { passive: true });
-
-      audioDest = audioCtx.createMediaStreamDestination();
-      const padF = audioCtx.createBiquadFilter(); padF.type="lowpass"; padF.frequency.value = 180;
-      const padG = audioCtx.createGain(); padG.gain.value = 0.012;
-      padF.connect(padG); padG.connect(audioDest);
-      osc1 = audioCtx.createOscillator(); osc1.frequency.value = 98;
-      osc1.connect(padF); osc1.start();
-
-      const text = sceneData.narration.replace(/\[.*?\]/g, " ").trim();
-      if (text) {
-        const voiceBus = createPowerfulVoiceBus(audioCtx, audioDest);
-        const clip = await fetchEmotionalNeuralVoice(audioCtx, text);
-        if (clip) {
-          const scheduleClip = () => {
-            const src = audioCtx.createBufferSource();
-            src.buffer = clip; src.connect(voiceBus); src.start(audioCtx.currentTime + 0.1);
-          };
-          if (audioCtx.state === "running") scheduleClip();
-          else document.addEventListener("touchstart", () => audioCtx.resume().then(scheduleClip), { once: true });
-        }
-      }
-      audioActive = (audioCtx.state === "running");
-    } catch(e){}
-
-    const DURATION = 15000;
-    const canvas = renderer.domElement;
-    const tracks = [...canvas.captureStream(30).getVideoTracks()];
-    if (audioActive && audioDest) tracks.push(...audioDest.stream.getAudioTracks());
-    
-    let recorder = null;
-    const chunks = [];
-    try {
-      const mime = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp8", "video/mp4", "video/webm"].find(m => MediaRecorder.isTypeSupported(m)) || "";
-      recorder = mime ? new MediaRecorder(new MediaStream(tracks), { mimeType: mime, videoBitsPerSecond: 4500000 }) : new MediaRecorder(new MediaStream(tracks));
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-      recorder.onstop = () => {
-        try { if(osc1) osc1.stop(); } catch(e){}
-        const blob = new Blob(chunks, { type: mime.includes("mp4") ? "video/mp4" : "video/webm" });
-        if (blob.size > 1000) {
-          const url = URL.createObjectURL(blob);
-          const btn = document.getElementById("uiDownloadBtn");
-          if (btn) { btn.href = url; btn.download = "kinetra3d_video." + (mime.includes("mp4") ? "mp4" : "webm"); btn.classList.remove("locked"); }
-          const p = document.getElementById("finalPlayer");
-          if (p) { p.src = url; p.style.display = "block"; canvas.style.display = "none"; p.play().catch(()=>{}); }
-        }
-        const hud = document.getElementById("renderHud");
-        if (hud) hud.style.display = "none";
-        const badge = document.getElementById("uiBadge");
-        if (badge) { badge.textContent = "READY"; badge.classList.add("ready"); }
+    // Auto Camera if AI didn't provide one
+    if (typeof window.animateScene !== "function") {
+      window.animateScene = (t, p) => {
+        const a = p * Math.PI - 0.5;
+        camera.position.set(Math.sin(a)*6, 2.5, Math.cos(a)*6);
+        camera.lookAt(0,1,0);
       };
-      recorder.start(250); 
-    } catch(e){}
+    }
 
-    const startT = performance.now();
-    let stopped = false;
+    // 6. FAST MP4 EXPORT
+    document.getElementById("uiStatus").textContent = "Rendering True MP4 Video...";
+    const { totalFrames, fps, buffer, lipEnvelope } = audioTrack;
     
-    if (uiStatus && !codeCrashed && !payloadError) uiStatus.textContent = "Rendering 3D Video & Studio Voice...";
+    function renderFrame(f) {
+      const t = f/fps;
+      mixers.forEach(m => m.update(1/fps));
+      try { window.animateScene(t, f/totalFrames); } catch(e){}
+      renderer.render(scene, camera);
+    }
 
-    function renderLoop(now) {
-      const el = now - startT;
-      const p = Math.min(1, el / DURATION);
-      const t = el / 1000;
-
-      const vE = getLiveVoiceEnergy();
-      const blink = Math.sin(t * 1.9) > 0.98 ? 0.1 : 1.0;
-      animatedCharacters.forEach((r) => {
-        r.leftEye.scale.y = blink; r.rightEye.scale.y = blink;
-        if (r.speaking) r.mouthPivot.scale.y = 0.5 + vE;
+    let finalBlob = null;
+    try {
+      const muxer = new Mp4Muxer.Muxer({
+        target: new Mp4Muxer.ArrayBufferTarget(),
+        video: { codec: "avc", width: WIDTH, height: HEIGHT },
+        audio: buffer ? { codec: "aac", numberOfChannels: 2, sampleRate: buffer.sampleRate } : undefined,
+        fastStart: "in-memory"
       });
 
-      if (typeof window.animateScene === "function") { try { window.animateScene(t, p); } catch(e){} }
-      renderer.render(scene, camera);
+      const vEnc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: console.error });
+      vEnc.configure({ codec: "avc1.42001f", width: WIDTH, height: HEIGHT, bitrate: 4000000, framerate: fps });
 
-      const prog = document.getElementById("uiProgress"), tim = document.getElementById("uiTimer");
-      if (prog) prog.style.width = Math.floor(p * 100) + "%";
-      if (tim) tim.textContent = Math.max(0, Math.ceil((DURATION - el)/1000)) + "s";
+      let aEnc = null;
+      if (buffer) {
+        aEnc = new AudioEncoder({ output: (c, m) => muxer.addAudioChunk(c, m), error: console.error });
+        aEnc.configure({ codec: "mp4a.40.2", numberOfChannels: 2, sampleRate: buffer.sampleRate, bitrate: 128000 });
+        const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
+        for (let o=0; o<buffer.length; o+=1024) {
+          const l = Math.min(1024, buffer.length-o);
+          const p = new Float32Array(l*2);
+          p.set(left.subarray(o, o+l), 0); p.set(right.subarray(o, o+l), l);
+          const ad = new AudioData({ format: "f32-planar", sampleRate: buffer.sampleRate, numberOfFrames: l, numberOfChannels: 2, timestamp: Math.round(o/buffer.sampleRate*1e6), data: p });
+          aEnc.encode(ad); ad.close();
+        }
+        await aEnc.flush();
+      }
 
-      if (p >= 1 && !stopped) { stopped = true; if (recorder && recorder.state !== "inactive") recorder.stop(); }
-      requestAnimationFrame(renderLoop);
+      for (let f=0; f<totalFrames; f++) {
+        renderFrame(f);
+        const vf = new VideoFrame(renderer.domElement, { timestamp: Math.round(f/fps*1e6), duration: Math.round(1/fps*1e6) });
+        vEnc.encode(vf, { keyFrame: f%30===0 });
+        vf.close();
+        if (f%15===0) {
+          document.getElementById("uiProgress").style.width = Math.floor(f/totalFrames*100) + "%";
+          await new Promise(r=>setTimeout(r, 0));
+        }
+      }
+
+      await vEnc.flush();
+      muxer.finalize();
+      finalBlob = new Blob([muxer.target.buffer], { type: "video/mp4" });
+    } catch(e) { console.error("MP4 Error", e); }
+
+    // Display & Download Setup
+    if (finalBlob) {
+      document.getElementById("renderHud").style.display = "none";
+      document.getElementById("uiBadge").textContent = "READY";
+      document.getElementById("uiBadge").classList.add("ready");
+      
+      const url = URL.createObjectURL(finalBlob);
+      const btn = document.getElementById("uiDownloadBtn");
+      btn.href = url;
+      btn.download = "kinetra3d_video.mp4";
+      btn.textContent = "Download MP4";
+      btn.classList.remove("locked");
+
+      const p = document.getElementById("finalPlayer");
+      p.src = url; p.style.display = "block";
+      renderer.domElement.style.display = "none";
+      p.play().catch(()=>{});
     }
-    requestAnimationFrame(renderLoop);
   }
 
-  startEngine();
+  startStudio();
 })();
